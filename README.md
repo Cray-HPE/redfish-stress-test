@@ -37,19 +37,26 @@ implementation.
    <enter redfish root password>
    # ENDPOINT=<hostname or IP>
    ```
-1. Test sustained communication
+1. Test sustained communication.
    Make calls to the Redfish endpoint at a rate of 1 call every 60/requests_per_minute seconds.
    ```
    # python3 RedfishStressTest.py -i https://$ENDPOINT -u root -p $PASSWD --test_requests --requests_per_minute 30 --runtime 5
    ```
-1. Test peak load
+1. Test peak load.
    Make calls to the Redfish endpoint as quickly as possible.
    ```
-   python3 RedfishStressTest.py -i https://$ENDPOINT -u root -p $PASSWD --test_requests --requests_per_minute 500 --runtime 1
+   # python3 RedfishStressTest.py -i https://$ENDPOINT -u root -p $PASSWD --test_requests --requests_per_minute 500 --runtime 1
    ```
-1. Test Redfish tree walk
+1. Test Redfish tree walk.
    ```
-   python3 RedfishStressTest.py -i https://$ENDPOINT -u root -p $PASSWD --test_rf_walk --runtime 1 --walk_count 10
+   # python3 RedfishStressTest.py -i https://$ENDPOINT -u root -p $PASSWD --test_rf_walk --runtime 1 --walk_count 10
    ```
-A summary is displayed at the end of the execution. A **.txt** file is created in the **logs** directory for further analysis.
+A summary is displayed at the end of each execution. A **.txt** file is created in the **logs** directory for further analysis.
 
+5. Test simultaneous connections using the sustained communication test.
+   ```
+   # max=10
+   # for x in $(seq 1 ${max}); do python3 RedfishStressTest.py -i https://$ENDPOINT -u root -p $PASSWD --test_requests \
+      --requests_per_minute 30 --runtime 1 & done | egrep Rate | awk -v m=${max} '{sum+=$4} END {print "Average Rate: " sum/m}'
+   ```
+If any errors occur, this test should be considered a failure. Make note of the performance changes of the BMC as the number of clients increases from the original test. A **.txt** file is created in the **logs** directory for further analysis.
