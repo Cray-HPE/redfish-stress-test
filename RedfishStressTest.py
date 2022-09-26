@@ -47,13 +47,16 @@ import urllib3
 
 from requests.auth import HTTPBasicAuth
 
-TOOL_VERSION = '0.0.1'
+TOOL_VERSION = '1.0.0'
 
 my_logger = logging.getLogger()
 my_logger.setLevel(logging.DEBUG)
 standard_out = logging.StreamHandler(sys.stdout)
 standard_out.setLevel(logging.INFO)
 my_logger.addHandler(standard_out)
+standard_err = logging.StreamHandler(sys.stderr)
+standard_err.setLevel(logging.ERROR)
+my_logger.addHandler(standard_err)
 
 VERBOSE1 = logging.INFO - 1
 VERBOSE2 = logging.INFO - 2
@@ -153,65 +156,6 @@ def getFirmwareVersion(args):
     return "unknown"
 
 
-def prepareThermalCall(args):
-    # Until certificates or sessions are being used to talk to Redfish endpoints
-    # the basic auth method will be used. To do so, SSL verification needs to be
-    # turned off which results in a InsecureRequestWarning. The following line
-    # disables only the IsnsecureRequestWarning.
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-    full_url = args.ip + '/redfish/v1/Chassis'
-    auth = HTTPBasicAuth(args.username, args.password)
-    headers = {
-        'cache-control': 'no-cache',
-    }
-
-    try:
-        rsp = requests.get(url=full_url, headers=headers, auth=auth, verify=False)
-
-    except Exception as e:
-        my_logger.log(VERBOSE1, 'Exception caught in %s trying to determine chassis member', prepareThermalCall.__name__)
-        my_logger.error('Unable to determine chassis member URI from %s: %s', full_url, repr(e))
-        return None
-
-    if rsp.status_code == HTTPStatus.UNAUTHORIZED:
-        my_logger.error("Authentication error trying to call URL %s", full_url)
-        return None
-
-    if rsp.status_code >= HTTPStatus.MULTIPLE_CHOICES:
-        my_logger.error("Error requesting URL %s: %s", full_url, HTTPStatus(rsp.status_code))
-        return None
-
-    data = rsp.text
-
-    try:
-        chassis = json.loads(data)
-
-    except Exception as je:
-        my_logger.log(VERBOSE1, 'Exception caught in %s unmarshalling response', prepareThermalCall.__name__)
-        my_logger.error('Unable to unmarshal json response %s: %s', data, repr(je))
-        return None
-
-    if len(chassis['Members']) < 1:
-        my_logger.error('No chassis Members found at %s', full_url)
-        return None
-
-    url = None
-    for m in chassis['Members']:
-        uri = m['@odata.id']
-        url = uri + '/Thermal'
-        full_url = args.ip + url
-        rsp = requests.get(url=full_url, headers=headers, auth=auth, verify=False)
-        if rsp.status_code == HTTPStatus.OK:
-            my_logger.info("Using %s for polling requests", url)
-            break
-
-    if url is None:
-        my_logger.error('Could not find a telemetry URL to poll')
-
-    return url
-
-
 def doRequests(args, rpm, runtime):
     global max_call
     global min_call
@@ -230,7 +174,7 @@ def doRequests(args, rpm, runtime):
 
     my_logger.log(VERBOSE2, 'doRequests: sleeptime: %.2f runtime in seconds: %d', sleeptime, runsecs)
 
-    url = prepareThermalCall(args)
+    url = prepareSystemsCall(args)
     if url is None:
         return 1
 
@@ -308,47 +252,12 @@ def prepareSystemsCall(args):
         full_url = args.ip + url
         rsp = requests.get(url=full_url, headers=headers, auth=auth, verify=False)
         if rsp.status_code == HTTPStatus.OK:
-            my_logger.info("Using %s for concurrent requests", url)
+            my_logger.info("Using %s for requests", url)
 
     if url is None:
-        my_logger.error('Could not find a telemetry URL to poll')
+        my_logger.error('Could not find a systems URL to poll')
 
     return url
-
-
-def doConcurrency(args, rpm, runtime, concurrent):
-    global max_call
-    global min_call
-    global max_call_url
-    global min_call_url
-    global avg_call
-    global final_rate
-    global rate
-
-    rate = 0
-    max_call = 0
-    min_call = 9999
-    max_call_url = ""
-    min_call_url = ""
-    avg_arr = []
-    url = ""
-    sleeptime = SECONDS_PER_MINUTE / rpm
-
-    runsecs = runtime * SECONDS_PER_MINUTE
-
-    my_logger.log(VERBOSE2, 'doConcurrency: threads: %d sleeptime: %.2f runtime in seconds: %d', concurrent, sleeptime, runsecs)
-
-    start_time = cur_time = time.time()
-    url = prepareSystemsCall(args)
-    if url is None:
-        return 1
-
-    total_time = cur_time - start_time
-    avg_call = sum(avg_arr) / len(avg_arr)
-    final_rate = rate / (total_time / SECONDS_PER_MINUTE)
-    my_logger.log(VERBOSE1, 'doConcurrency: took: %.2f s', total_time)
-
-    return 0
 
 
 def addStorage(uriList, payload):
@@ -596,9 +505,6 @@ def main(argslist=None, configfile=None):
     parser.add_argument('-u', '--username', type=str, help='Username for Authentication')
     parser.add_argument('-p', '--password', type=str, help='Password for Authentication')
     parser.add_argument('--description', type=str, help='sysdescription for identifying logs, if none is given, draw from service root')
-    # parser.add_argument('--forceauth', action='store_true', help='Force authentication on unsecure connections')
-    # parser.add_argument('--authtype', type=str, default='Basic', help='authorization type (None|Basic|Session|Token)')
-    # parser.add_argument('--token', type=str, help='bearer token for authtype Token')
 
     parser.add_argument('--logdir', type=str, default='./logs', help='directory for log files')
     parser.add_argument('--debugging', action="store_true", help='Output debug statements to text log, otherwise it only uses INFO')
@@ -609,8 +515,6 @@ def main(argslist=None, configfile=None):
     parser.add_argument('--runtime', type=int, default=1, help='Length of time to run stress test. Default 1 minute')
     parser.add_argument('--test_rf_walk', action='store_true', help='Walk the Redfish tree from the root')
     parser.add_argument('--walk_count', type=int, default=1, help='Number of times to walk the Redfish tree. Default 1')
-    parser.add_argument('--test_concurrent', action='store_true', help='Execute the concurrent connection test.')
-    parser.add_argument('--concurrent', type=int, default=10, help='Number of concurrent connections to initiate with the Redfish endpoint. Default 10.')
 
     args = parser.parse_args(argslist)
 
@@ -720,50 +624,6 @@ def main(argslist=None, configfile=None):
         my_logger.info('\tAvg call time (seconds): %.2f', avg_call)
         my_logger.info('\tNumber of Redfish calls: %d', rate)
         my_logger.info('\tNumber of failures: %d', failures)
-
-
-    ###########################################################################
-    # Execute concurrent stress test
-    #
-    # Light load
-    #   --test_concurrent
-    #   --concurrent 10
-    #   --requests_per_minute 12
-    #   --runtime 1
-    #
-    # Heavy load
-    #   --test_concurrent
-    #   --concurrent 10
-    #   --requests_per_minute 60
-    #   --runtime 1
-    ###########################################################################
-    if args.test_concurrent is True:
-        my_logger.info("******************************************************")
-        my_logger.info('Concurrent test not supported.')
-
-        # my_logger.info("Begin concurrent requests")
-        #
-        # if args.requests_per_minute > 0:
-        #     rpm = args.requests_per_minute
-        # else:
-        #     rpm = 30
-        #
-        # concurrent = max(args.concurrent, 2)
-        #
-        # ret = doConcurrency(args, rpm, runtime, concurrent)
-        #
-        # if ret != 0:
-        #     my_logger.info('Concurrent rate statistics failed')
-        #     return 1
-        #
-        # my_logger.info('Redfish concurrency test rate statistics')
-        # my_logger.info('\tRate achieved (requests/min): %d', final_rate)
-        # my_logger.info('\tMax call time (seconds) and url: %.2f (%s)', max_call, max_call_url)
-        # my_logger.info('\tMin call time (seconds) and url: %.2f (%s)', min_call, min_call_url)
-        # my_logger.info('\tAvg call time (seconds): %.2f', avg_call)
-        # my_logger.info('\tNumber of Redfish calls: %d', rate)
-        # my_logger.info('\tNumber of failures: %d', failures)
-        #
 
     ###########################################################################
     # Execute HSM style Redfish walk
