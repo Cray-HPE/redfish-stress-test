@@ -1,6 +1,6 @@
 # MIT License
 #
-# (C) Copyright [2022] Hewlett Packard Enterprise Development LP
+# (C) Copyright [2022-2023] Hewlett Packard Enterprise Development LP
 #
 # Permission is hereby granted, free of charge, to any person obtaining a
 # copy of this software and associated documentation files (the "Software"),
@@ -65,22 +65,56 @@ logging.addLevelName(VERBOSE2, "VERBOSE2")
 
 SECONDS_PER_MINUTE = 60
 
-rate = 0
-final_rate = 0
-max_call = 0.0
-min_call = 9999.0
-avg_call = 0.0
-failures = 0
-max_call_url = ""
-min_call_url = ""
+class PerfData:
+    """
+    Performance Data class
+    rate
+    final_rate
+    max_call
+    min_call
+    avg_call
+    failures
+    max_call_url
+    min_call_url
+    """
+    rate = 0
+    final_rate = 0
+    max_call = 0.0
+    min_call = 0.0
+    avg_call = 0.0
+    failures = 0
+    max_call_url = ""
+    min_call_url = ""
+
+    def add_rate(self, val):
+        self.rate += val
+
+    def reset_rate(self):
+        self.rate = 0
+
+    def set_final_rate(self, val):
+        self.final_rate = val
+
+    def set_max_call_time(self, val):
+        self.max_call = val
+
+    def set_max_call_url(self, val):
+        self.max_call_url = val
+
+    def set_min_call_time(self, val):
+        self.min_call = val
+
+    def set_min_call_url(self, val):
+        self.min_call_url = val
+
+    def set_avg_call(self, val):
+        self.avg_call = val
+
+    def add_failure(self):
+        self.failures += 1
 
 
-def doCall(args, url):
-    global rate
-    global max_call
-    global min_call
-    global max_call_url
-    global min_call_url
+def doCall(args, data, url):
     # Until certificates or sessions are being used to talk to Redfish
     # endpoints the basic auth method will be used. To do so, SSL verification
     # needs to be turned off which results in a InsecureRequestWarning. The
@@ -93,11 +127,12 @@ def doCall(args, url):
     }
 
     url = args.ip + url
-    rate = rate + 1
+    data.add_rate(1)
     start_call = time.time()
 
     try:
-        rsp = requests.get(url=url, headers=headers, auth=auth, verify=False)
+        rsp = requests.get(url=url, headers=headers, auth=auth, verify=False,
+                    timeout=30)
 
     except Exception as e:
         my_logger.log(VERBOSE1, 'Exception caught in doCall')
@@ -117,13 +152,13 @@ def doCall(args, url):
         my_logger.error("Error requesting URL %s: %s", url, HTTPStatus(rsp.status_code))
         return call_time, None
 
-    if call_time > max_call:
-        max_call = call_time
-        max_call_url = url
+    if call_time > data.max_call:
+        data.set_max_call_time(call_time)
+        data.set_max_call_url(url)
 
-    if call_time < min_call:
-        min_call = call_time
-        min_call_url = url
+    if call_time < data.min_call:
+        data.set_min_call_time(call_time)
+        data.set_min_call_url(url)
 
     return call_time, rsp
 
@@ -131,15 +166,15 @@ def doCall(args, url):
 BMC_FW_NAMES = ['BMC', 'iLO 5']
 
 
-def getFirmwareVersion(args):
-    _, service_root = doGenericURICall(args, "/redfish/v1/", "Service Root")
+def getFirmwareVersion(args, data):
+    _, service_root = doGenericURICall(args, data, "/redfish/v1/", "Service Root")
     if service_root is not None:
-        _, update_service = doGenericURICall(args, service_root["UpdateService"]['@odata.id'], "UpdateService")
+        _, update_service = doGenericURICall(args, data, service_root["UpdateService"]['@odata.id'], "UpdateService")
         if update_service is not None:
-            _, firmware_inventory = doGenericURICall(args, update_service["FirmwareInventory"]['@odata.id'], "FirmwareInventory")
+            _, firmware_inventory = doGenericURICall(args, data, update_service["FirmwareInventory"]['@odata.id'], "FirmwareInventory")
             if firmware_inventory is not None:
                 for m in firmware_inventory['Members']:
-                    _, firmware_entry = doGenericURICall(args, m['@odata.id'], "firmware entry")
+                    _, firmware_entry = doGenericURICall(args, data, m['@odata.id'], "firmware entry")
                     if firmware_entry is not None:
                         if firmware_entry['Name'] in BMC_FW_NAMES:
                             return firmware_entry['Version']
@@ -156,23 +191,20 @@ def getFirmwareVersion(args):
     return "unknown"
 
 
-def doRequests(args, rpm, runtime):
-    global max_call
-    global min_call
-    global avg_call
-    global final_rate
-    global rate
-    global failures
+def doRequests(args, data, rpm, runtime):
+    data.reset_rate()
+    data.set_max_call_time(0)
+    data.set_max_call_url("")
+    data.set_min_call_time(9999)
+    data.set_min_call_url("")
 
-    rate = 0
     avg_arr = []
-    max_call = 0
-    min_call = 9999
     sleeptime = SECONDS_PER_MINUTE / rpm
 
     runsecs = runtime * SECONDS_PER_MINUTE
 
-    my_logger.log(VERBOSE2, 'doRequests: sleeptime: %.2f runtime in seconds: %d', sleeptime, runsecs)
+    my_logger.log(VERBOSE2,
+        'doRequests: sleeptime: %.2f runtime in seconds: %d',sleeptime, runsecs)
 
     url = prepareSystemsCall(args)
     if url is None:
@@ -181,24 +213,26 @@ def doRequests(args, rpm, runtime):
     start_requests = last_request = time.time()
     total_time = 0
 
-    while total_time < runsecs and rate < (rpm * runtime):
-        call_time, rsp = doCall(args, url)
+    while total_time < runsecs and data.rate < (rpm * runtime):
+        call_time, rsp = doCall(args, data, url)
         last_request = time.time()
 
         if rsp is None:
-            failures = failures + 1
+            data.add_failure()
             my_logger.error('Poll request to %s failed', url)
 
         avg_arr.append(call_time)
 
         total_time = last_request - start_requests
-        my_logger.log(VERBOSE2, 'doRequests: call %d: call_time: %.2f time accumulated: %.2f', rate, call_time, total_time)
+        my_logger.log(VERBOSE2,
+            'doRequests: call %d: call_time: %.2f time accumulated: %.2f',
+            data.rate, call_time, total_time)
 
         if call_time < sleeptime:
             time.sleep(sleeptime - call_time)
 
-    avg_call = sum(avg_arr) / len(avg_arr)
-    final_rate = rate / (total_time / SECONDS_PER_MINUTE)
+    data.set_avg_call(sum(avg_arr) / len(avg_arr))
+    data.set_final_rate(data.rate / (total_time / SECONDS_PER_MINUTE))
     my_logger.log(VERBOSE1, 'doRequests: took: %.2f s', total_time)
     return 0
 
@@ -217,7 +251,8 @@ def prepareSystemsCall(args):
     }
 
     try:
-        rsp = requests.get(url=full_url, headers=headers, auth=auth, verify=False)
+        rsp = requests.get(url=full_url, headers=headers, auth=auth,
+                    verify=False, timeout=30)
 
     except Exception as e:
         my_logger.log(VERBOSE1, 'Exception caught in %s trying to determine systems member', prepareSystemsCall.__name__)
@@ -232,14 +267,14 @@ def prepareSystemsCall(args):
         my_logger.error("Error requesting URL %s: %s", full_url, HTTPStatus(rsp.status_code))
         return None
 
-    data = rsp.text
+    response = rsp.text
 
     try:
-        systems = json.loads(data)
+        systems = json.loads(response)
 
     except Exception as je:
         my_logger.log(VERBOSE1, 'Exception caught in %s unmarshalling response', prepareSystemsCall.__name__)
-        my_logger.error('Unable to unmarshal json response %s: %s', data, repr(je))
+        my_logger.error('Unable to unmarshal json response %s: %s', response, repr(je))
         return None
 
     if len(systems['Members']) < 1:
@@ -250,7 +285,8 @@ def prepareSystemsCall(args):
     if "Members" in systems:
         url = systems['Members'][0]['@odata.id']
         full_url = args.ip + url
-        rsp = requests.get(url=full_url, headers=headers, auth=auth, verify=False)
+        rsp = requests.get(url=full_url, headers=headers, auth=auth,
+                    verify=False, timeout=30)
         if rsp.status_code == HTTPStatus.OK:
             my_logger.info("Using %s for requests", url)
 
@@ -273,8 +309,7 @@ def addStorage(uriList, payload):
         my_logger.error("Drives list missing from %s", payload['@odata.id'])
 
 
-def addComputerSystem(uriList, payload):
-    global failures
+def addComputerSystem(uriList, payload, data):
     entries = ["EthernetInterfaces", "Processors", "Memory"]
     optional = ["NetworkInterfaces", "ResetActionInfo", "Storage"]
     my_logger.log(VERBOSE1, "addComputerSystem for %s", payload['@odata.id'])
@@ -285,7 +320,7 @@ def addComputerSystem(uriList, payload):
             uriList.append((e, payload[e]['@odata.id']))
         else:
             my_logger.error("Systems schema %s missing %s", payload['@odata.id'], e)
-            failures = failures + 1
+            data.add_failure()
 
     for o in optional:
         if o in payload:
@@ -296,7 +331,6 @@ def addComputerSystem(uriList, payload):
 
 
 def addManager(uriList, payload):
-    global failures
     entries = ["EthernetInterfaces"]
     my_logger.log(VERBOSE1, "addManager for %s", payload['@odata.id'])
 
@@ -308,8 +342,7 @@ def addManager(uriList, payload):
             my_logger.log(VERBOSE1, "Managers schema does not have optional %s", e)
 
 
-def addChassis(uriList, payload):
-    global failures
+def addChassis(uriList, payload, data):
     entries = ["Power", "NetworkAdapters"]
     optional = ["Controls", "Assembly"]
     my_logger.log(VERBOSE1, "addChassis for %s", payload['@odata.id'])
@@ -321,7 +354,7 @@ def addChassis(uriList, payload):
             uriList.append((e, payload[e]['@odata.id']))
         else:
             my_logger.error("Chassis schema %s missing %s", payload['@odata.id'], e)
-            failures = failures + 1
+            data.add_failure()
 
     for o in optional:
         if o in payload:
@@ -340,8 +373,7 @@ def addChassis(uriList, payload):
         my_logger.log(VERBOSE1, "Chassis schema does not have optional Oem Devices")
 
 
-def addCollection(uriList, payload):
-    global failures
+def addCollection(uriList, payload, data):
     count = 0
     my_logger.log(VERBOSE1, "addCollection for %s", payload['Name'])
     if "Members" in payload:
@@ -355,7 +387,7 @@ def addCollection(uriList, payload):
             my_logger.log(VERBOSE1, "StorageCollection does not have option Member list")
         else:
             my_logger.error("Member list missing from %s", payload['@odata.id'])
-            failures = failures + 1
+            data.add_failure()
 
 
 def addServiceRoot(uriList, payload):
@@ -369,46 +401,38 @@ def addServiceRoot(uriList, payload):
             my_logger.error("Service root missing %s", e)
 
 
-def doGenericURICall(args, url, label):
+def doGenericURICall(args, data, url, label):
     my_logger.log(VERBOSE2, "doGenericURICall for %s at %s", label, url)
-    call_time, rsp = doCall(args, url)
+    call_time, rsp = doCall(args, data, url)
 
     if rsp is None:
-        global failures
-        failures = failures + 1
+        data.add_failure()
         return call_time, None
 
-    data = rsp.text
+    response = rsp.text
 
     try:
-        payload = json.loads(data)
+        payload = json.loads(response)
 
     except Exception as je:
         my_logger.log(VERBOSE1, 'Exception caught unmarshalling %s response', label)
         my_logger.error('Unable to unmarshal json response %s: %s', data, repr(je))
-        failures = failures + 1
+        data.add_failure()
         return call_time, None
 
     return call_time, payload
 
 
-def doRFWalk(args, count, runtime):
-    global max_call
-    global min_call
-    global max_call_url
-    global min_call_url
-    global avg_call
-    global final_rate
-    global rate
-
+def doRFWalk(args, data, count, runtime):
     LABEL = 0
     URL = 1
 
-    rate = 0
-    max_call = 0
-    min_call = 9999
-    max_call_url = ""
-    min_call_url = ""
+    data.reset_rate()
+    data.set_max_call_time(0)
+    data.set_max_call_url("")
+    data.set_min_call_time(9999)
+    data.set_min_call_url("")
+
     avg_arr = []
     walk_count = 0
 
@@ -423,7 +447,7 @@ def doRFWalk(args, count, runtime):
         ###################################################################
         # Service Root
         ###################################################################
-        call_time, service_root = doGenericURICall(args, "/redfish/v1/", "Service Root")
+        call_time, service_root = doGenericURICall(args, data, "/redfish/v1/", "Service Root")
         cur_time = time.time()
         avg_arr.append(call_time)
 
@@ -441,7 +465,7 @@ def doRFWalk(args, count, runtime):
         ###################################################################
         for uri in uriList:
             my_logger.log(VERBOSE2, "Handling uri %s", str(uri))
-            call_time, payload = doGenericURICall(args, uri[URL], uri[LABEL])
+            call_time, payload = doGenericURICall(args, data, uri[URL], uri[LABEL])
             cur_time = time.time()
             avg_arr.append(call_time)
 
@@ -462,11 +486,11 @@ def doRFWalk(args, count, runtime):
                     or payload['@odata.type'] == "#ProcessorCollection.ProcessorCollection"
                     or payload['@odata.type'] == "#MemoryCollection.MemoryCollection"
                     or payload['@odata.type'] == "#StorageCollection.StorageCollection"):
-                    addCollection(uriList, payload)
+                    addCollection(uriList, payload, data)
                 elif payload['@odata.type'].split('.')[0] == "#Chassis":
-                    addChassis(uriList, payload)
+                    addChassis(uriList, payload, data)
                 elif payload['@odata.type'].split('.')[0] == "#ComputerSystem":
-                    addComputerSystem(uriList, payload)
+                    addComputerSystem(uriList, payload, data)
                 elif payload['@odata.type'].split('.')[0] == "#Manager":
                     addManager(uriList, payload)
                 elif payload['@odata.type'].split('.')[0] == "#Storage":
@@ -474,10 +498,10 @@ def doRFWalk(args, count, runtime):
                 else:
                     my_logger.log(VERBOSE2, "No match for @odata.type %s for %s", payload['@odata.type'], str(uri))
 
-    avg_call = sum(avg_arr) / len(avg_arr)
+    data.set_avg_call(sum(avg_arr) / len(avg_arr))
     total_time = cur_time - start_time
-    final_rate = rate / (total_time / SECONDS_PER_MINUTE)
-    my_logger.log(VERBOSE1, 'doRFWalk made %d calls over %.2f s', rate, total_time)
+    data.set_final_rate(data.rate / (total_time / SECONDS_PER_MINUTE))
+    my_logger.log(VERBOSE1, 'doRFWalk made %d calls over %.2f s', data.rate, total_time)
     return 0
 
 
@@ -487,14 +511,7 @@ def main(argslist=None, configfile=None):
     Args:
         argslist ([type], optional): List of arguments in the form of argv. Defaults to None.
     """
-    global final_rate
-    global max_call
-    global min_call
-    global max_call_url
-    global min_call_url
-    global avg_call
-
-    parser = argparse.ArgumentParser(description='HPE tool to stress test a Redfish implementation, version {}'.format(TOOL_VERSION))
+    parser = argparse.ArgumentParser(description=f'HPE tool to stress test a Redfish implementation, version {TOOL_VERSION}')
 
     # base tool
     parser.add_argument('-v', '--verbose', action='count', default=0, help='Verbosity of tool in stdout')
@@ -517,6 +534,8 @@ def main(argslist=None, configfile=None):
     parser.add_argument('--walk_count', type=int, default=1, help='Number of times to walk the Redfish tree. Default 1')
 
     args = parser.parse_args(argslist)
+
+    data = PerfData()
 
     if configfile is None:
         configfile = args.config
@@ -574,7 +593,7 @@ def main(argslist=None, configfile=None):
     my_logger.info('Start time: %s', startTick.strftime('%x - %X'))
     my_logger.info("")
 
-    firmware = getFirmwareVersion(args)
+    firmware = getFirmwareVersion(args, data)
     my_logger.info('BMC Firmware Version: %s', firmware)
     my_logger.info("")
 
@@ -612,18 +631,18 @@ def main(argslist=None, configfile=None):
         else:
             rpm = 30
 
-        ret = doRequests(args, rpm, runtime)
+        ret = doRequests(args, data, rpm, runtime)
         if ret != 0:
             my_logger.info('Request rate statistics failed')
             return 1
 
         my_logger.info('Request rate statistics')
-        my_logger.info('\tRate achieved (requests/min): %d', final_rate)
-        my_logger.info('\tMax call time (seconds): %.2f', max_call)
-        my_logger.info('\tMin call time (seconds): %.2f', min_call)
-        my_logger.info('\tAvg call time (seconds): %.2f', avg_call)
-        my_logger.info('\tNumber of Redfish calls: %d', rate)
-        my_logger.info('\tNumber of failures: %d', failures)
+        my_logger.info('\tRate achieved (requests/min): %d', data.final_rate)
+        my_logger.info('\tMax call time (seconds): %.2f', data.max_call)
+        my_logger.info('\tMin call time (seconds): %.2f', data.min_call)
+        my_logger.info('\tAvg call time (seconds): %.2f', data.avg_call)
+        my_logger.info('\tNumber of Redfish calls: %d', data.rate)
+        my_logger.info('\tNumber of failures: %d', data.failures)
 
     ###########################################################################
     # Execute HSM style Redfish walk
@@ -644,18 +663,18 @@ def main(argslist=None, configfile=None):
 
         my_logger.log(VERBOSE1, "Using a walk count of %d", count)
 
-        ret = doRFWalk(args, count, runtime)
+        ret = doRFWalk(args, data, count, runtime)
         if ret != 0:
             my_logger.info('Redfish walk rate statistics failed')
             return 1
 
         my_logger.info('Redfish discovery walk rate statistics')
-        my_logger.info('\tRate achieved (requests/min): %d', final_rate)
-        my_logger.info('\tMax call time (seconds) and url: %.2f (%s)', max_call, max_call_url)
-        my_logger.info('\tMin call time (seconds) and url: %.2f (%s)', min_call, min_call_url)
-        my_logger.info('\tAvg call time (seconds): %.2f', avg_call)
-        my_logger.info('\tNumber of Redfish calls: %d', rate)
-        my_logger.info('\tNumber of failures: %d', failures)
+        my_logger.info('\tRate achieved (requests/min): %d', data.final_rate)
+        my_logger.info('\tMax call time (seconds) and url: %.2f (%s)', data.max_call, data.max_call_url)
+        my_logger.info('\tMin call time (seconds) and url: %.2f (%s)', data.min_call, data.min_call_url)
+        my_logger.info('\tAvg call time (seconds): %.2f', data.avg_call)
+        my_logger.info('\tNumber of Redfish calls: %d', data.rate)
+        my_logger.info('\tNumber of failures: %d', data.failures)
 
     return 0
 
